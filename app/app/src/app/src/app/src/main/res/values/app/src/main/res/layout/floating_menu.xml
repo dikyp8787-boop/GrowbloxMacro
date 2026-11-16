@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="#DD000000"
+    android:orientation="vertical"
+    android:padding="15dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="GROWBLOX MACRO"
+        android:textColor="#FFFFFF"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="10dp" />
+
+    <CheckBox
+        android:id="@+id/cbAutoPunch"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Auto Punch"
+        android:textColor="#FFFFFF" />
+
+    <CheckBox
+        android:id="@+id/cbAutoCollect"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Auto Collect"
+        android:textColor="#FFFFFF" />
+
+    <Button
+        android:id="@+id/btnStart"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:backgroundTint="#4CAF50"
+        android:text="MULAI MACRO" />
+</LinearLayout>
