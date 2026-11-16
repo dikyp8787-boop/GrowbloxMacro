@@ -21,7 +21,14 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
-import android.widget.*
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.SeekBar
+import android.widget.Switch
+import android.widget.TextView
+import android.widget.Toast
 import kotlin.math.abs
 import kotlin.random.Random
 
@@ -60,6 +67,8 @@ class MacroService : AccessibilityService() {
     private lateinit var tvHeaderStatus: TextView
     private lateinit var btnFarmModeCycle: Button
     private lateinit var btnStartStopFarm: Button
+    private var swMove: Switch? = null
+    private var swSpam: Switch? = null
 
     // Farm Mode: 0 = FULL AUTO (Block -> Place -> Hand -> Punch), 1 = PUNCH ONLY, 2 = PLACE ONLY
     private var farmSubMode = 0
@@ -71,7 +80,7 @@ class MacroService : AccessibilityService() {
     private val selectedTiles = mutableSetOf<Int>()
     private val gridCells = mutableListOf<TextView>()
 
-    // Antrean Langkah Berurutan (Agar Place & Punch tidak pernah bertabrakan)
+    // Antrean Langkah Berurutan (Agar Place & Punch tidak bertabrakan)
     private data class MacroStep(
         val x: Float,
         val y: Float,
@@ -115,7 +124,6 @@ class MacroService : AccessibilityService() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        // Sesuaikan posisi floating icon & menu saat layar berputar ke Lanskap
         val dm = resources.displayMetrics
         iconParams?.let { p ->
             p.x = p.x.coerceIn(0, (dm.widthPixels - dp(44)).coerceAtLeast(0))
@@ -123,8 +131,8 @@ class MacroService : AccessibilityService() {
             runCatching { windowManager?.updateViewLayout(iconView, p) }
         }
         menuParams?.let { p ->
-            p.x = p.x.coerceIn(0, (dm.widthPixels - dp(295)).coerceAtLeast(0))
-            p.y = p.y.coerceIn(0, (dm.heightPixels - dp(260)).coerceAtLeast(0))
+            p.x = p.x.coerceIn(0, (dm.widthPixels - dp(300)).coerceAtLeast(0))
+            p.y = p.y.coerceIn(0, (dm.heightPixels - dp(250)).coerceAtLeast(0))
             runCatching { windowManager?.updateViewLayout(menuView, p) }
         }
     }
@@ -135,7 +143,6 @@ class MacroService : AccessibilityService() {
 
     private fun loadSavedCalibration() {
         val dm = resources.displayMetrics
-        // Pastikan default memakai rasio lanskap (sisi panjang = X, sisi pendek = Y)
         val landW = maxOf(dm.widthPixels, dm.heightPixels).toFloat()
         val landH = minOf(dm.widthPixels, dm.heightPixels).toFloat()
 
@@ -179,7 +186,7 @@ class MacroService : AccessibilityService() {
         if (!Settings.canDrawOverlays(this) || iconView != null) return
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
-        // Default tile aktif: 1 blok kiri (6) & 1 blok kanan (8) dari karakter
+        selectedTiles.clear()
         selectedTiles.add(6)
         selectedTiles.add(8)
 
@@ -203,8 +210,16 @@ class MacroService : AccessibilityService() {
 
         iconParams = createBaseLayoutParams(dp(44), dp(44), dp(14), dp(24))
         makeDraggable(iconView!!, iconParams!!) {
-            isMenuOpen = !isMenuOpen
-            menuView?.visibility = if (isMenuOpen) View.VISIBLE else View.GONE
+            if (isFarmRunning || isMoveRunning || isSpamRunning) {
+                // 1-Tap Stop saat macro berjalan + buka kembali Mod Menu
+                stopAllAutomation()
+                isMenuOpen = true
+                menuView?.visibility = View.VISIBLE
+                Toast.makeText(this, "Macro dihentikan!", Toast.LENGTH_SHORT).show()
+            } else {
+                isMenuOpen = !isMenuOpen
+                menuView?.visibility = if (isMenuOpen) View.VISIBLE else View.GONE
+            }
         }
         windowManager?.addView(iconView, iconParams)
     }
@@ -217,7 +232,7 @@ class MacroService : AccessibilityService() {
             visibility = View.GONE
         }
 
-        // Header Bar (Bisa digeser)
+        // Header Bar (Draggable)
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -279,7 +294,7 @@ class MacroService : AccessibilityService() {
         tabBar.addView(tabSetting)
         menuView?.addView(tabBar)
 
-        // Scrollable Content Area (Tinggi pas untuk layar HP Lanskap)
+        // Scrollable Content Area
         val scrollContainer = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -356,6 +371,25 @@ class MacroService : AccessibilityService() {
             refreshGridColors()
             addView(gridContainer)
 
+            // Tombol Reset Pilihan Grid
+            val btnClearGrid = Button(this@MacroService).apply {
+                text = "RESET PILIHAN KOTAK GRID"
+                textSize = 10f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.parseColor("#F87171"))
+                background = makeBoxBg("#1E151B", "#EF4444", 6, 1)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(30)
+                ).apply { topMargin = dp(6) }
+                setOnClickListener {
+                    selectedTiles.clear()
+                    refreshGridColors()
+                    if (isFarmRunning) stopAllAutomation()
+                }
+            }
+            addView(btnClearGrid)
+
             // Tombol Pilih Mode Farm
             btnFarmModeCycle = Button(this@MacroService).apply {
                 text = "MODE: PLACE BLOCK -> GANTI HAND -> PUNCH"
@@ -366,7 +400,7 @@ class MacroService : AccessibilityService() {
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     dp(34)
-                ).apply { topMargin = dp(8) }
+                ).apply { topMargin = dp(6) }
                 setOnClickListener {
                     farmSubMode = (farmSubMode + 1) % 3
                     text = when (farmSubMode) {
@@ -429,16 +463,21 @@ class MacroService : AccessibilityService() {
 
             addView(makeHint("Auto Patroli menyentuh sisi kiri & kanan layar lanskap."))
 
-            addView(makeToggleRow("Auto Walk Left / Right", isMoveRunning) { checked ->
+            val row = makeToggleRow("Auto Walk Left / Right", isMoveRunning) { checked ->
                 if (checked) {
                     stopAllAutomation()
                     isMoveRunning = true
+                    swMove?.isChecked = true
+                    isMenuOpen = false
+                    menuView?.visibility = View.GONE
                     updateRunningUI("AUTO MOVE")
                     runMoveLoop()
-                } else {
+                } else if (isMoveRunning) {
                     stopAllAutomation()
                 }
-            })
+            }
+            swMove = row.getChildAt(1) as Switch
+            addView(row)
 
             addView(makeSlider("Durasi Jalan per Arah", moveHoldMs.toInt(), 300, 3500, "ms") {
                 moveHoldMs = it.toLong()
@@ -453,16 +492,21 @@ class MacroService : AccessibilityService() {
 
             addView(makeHint("Menyalin teks dari aplikasi utama dan mengirim otomatis ke chat."))
 
-            addView(makeToggleRow("Auto Spam Chat", isSpamRunning) { checked ->
+            val row = makeToggleRow("Auto Spam Chat", isSpamRunning) { checked ->
                 if (checked) {
                     stopAllAutomation()
                     isSpamRunning = true
+                    swSpam?.isChecked = true
+                    isMenuOpen = false
+                    menuView?.visibility = View.GONE
                     updateRunningUI("AUTO SPAM")
                     runSpamLoop()
-                } else {
+                } else if (isSpamRunning) {
                     stopAllAutomation()
                 }
-            })
+            }
+            swSpam = row.getChildAt(1) as Switch
+            addView(row)
 
             addView(makeSlider("Interval Spam", spamIntervalSec, 3, 30, "dtk") {
                 spamIntervalSec = it
@@ -539,7 +583,6 @@ class MacroService : AccessibilityService() {
     private fun saveAndHideCalibrationMarkers() {
         if (!isCalibrating) return
 
-        // Baca koordinat fisik layar yang 100% cocok dengan dispatchGesture()
         markerChar?.let { v ->
             val loc = IntArray(2)
             v.getLocationOnScreen(loc)
@@ -581,8 +624,10 @@ class MacroService : AccessibilityService() {
         markerBlock = null
         markerHand = null
 
-        btnCalibrateAll.text = "ATUR POSISI [⊕ KARAKTER | BLK | HND]"
-        btnCalibrateAll.background = makeBoxBg("#00E5FF", "#00E5FF", 8, 1)
+        if (::btnCalibrateAll.isInitialized) {
+            btnCalibrateAll.text = "ATUR POSISI [⊕ KARAKTER | BLK | HND]"
+            btnCalibrateAll.background = makeBoxBg("#00E5FF", "#00E5FF", 8, 1)
+        }
     }
 
     private fun makeMarkerBadge(label: String, strokeHex: String, fillHex: String): TextView {
@@ -608,6 +653,10 @@ class MacroService : AccessibilityService() {
         }
         if (isCalibrating) saveAndHideCalibrationMarkers()
         stopAllAutomation()
+
+        // Otomatis sembunyikan menu agar tidak tersentuh oleh auto-clicker
+        isMenuOpen = false
+        menuView?.visibility = View.GONE
 
         isFarmRunning = true
         btnStartStopFarm.text = "⏹ HENTIKAN AUTO FARM"
@@ -648,7 +697,6 @@ class MacroService : AccessibilityService() {
             }
 
             1 -> {
-                // Mode Hanya Punch
                 for (tileIdx in tiles) {
                     val (tx, ty) = getTileScreenCoord(tileIdx)
                     stepQueue.add(MacroStep(tx, ty, punchHoldMs, actionDelayMs))
@@ -656,7 +704,6 @@ class MacroService : AccessibilityService() {
             }
 
             2 -> {
-                // Mode Hanya Place
                 for (tileIdx in tiles) {
                     val (tx, ty) = getTileScreenCoord(tileIdx)
                     stepQueue.add(MacroStep(tx, ty, 55L, actionDelayMs))
@@ -745,6 +792,9 @@ class MacroService : AccessibilityService() {
         isSpamRunning = false
         handler.removeCallbacksAndMessages(null)
 
+        swMove?.isChecked = false
+        swSpam?.isChecked = false
+
         if (::btnStartStopFarm.isInitialized) {
             btnStartStopFarm.text = "▶ MULAI AUTO FARM"
             btnStartStopFarm.background = makeBoxBg("#15803D", "#22C55E", 8, 1)
@@ -760,7 +810,6 @@ class MacroService : AccessibilityService() {
     }
 
     private fun dispatchTapOrHold(x: Float, y: Float, durationMs: Long, onDone: () -> Unit) {
-        // Baca dimensi layar secara dinamis agar selalu akurat di mode Lanskap
         val dm = resources.displayMetrics
         val safeX = x.coerceIn(5f, (dm.widthPixels - 5).toFloat())
         val safeY = y.coerceIn(5f, (dm.heightPixels - 5).toFloat())
