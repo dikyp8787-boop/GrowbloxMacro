@@ -45,7 +45,7 @@ class MacroService : AccessibilityService() {
     private var menuParams: WindowManager.LayoutParams? = null
     private var isMenuOpen = false
 
-    // 3 Penanda Kalibrasi (Karakter, Slot Block, Slot Hand/Fist)
+    // 5 Penanda Kalibrasi (Karakter, Slot Block, Slot Hand, Jalan Kiri, Jalan Maju/Kanan)
     private var isCalibrating = false
     private var markerChar: TextView? = null
     private var markerCharParams: WindowManager.LayoutParams? = null
@@ -53,6 +53,10 @@ class MacroService : AccessibilityService() {
     private var markerBlockParams: WindowManager.LayoutParams? = null
     private var markerHand: TextView? = null
     private var markerHandParams: WindowManager.LayoutParams? = null
+    private var markerLeft: TextView? = null
+    private var markerLeftParams: WindowManager.LayoutParams? = null
+    private var markerRight: TextView? = null
+    private var markerRightParams: WindowManager.LayoutParams? = null
     private lateinit var btnCalibrateAll: Button
 
     // UI References
@@ -66,12 +70,16 @@ class MacroService : AccessibilityService() {
     private lateinit var pageSetting: LinearLayout
     private lateinit var tvHeaderStatus: TextView
     private lateinit var btnFarmModeCycle: Button
+    private lateinit var btnStepDirCycle: Button
     private lateinit var btnStartStopFarm: Button
     private var swMove: Switch? = null
     private var swSpam: Switch? = null
 
-    // Farm Mode: 0 = FULL AUTO (Block -> Place -> Hand -> Punch), 1 = PUNCH ONLY, 2 = PLACE ONLY
+    // Farm Mode: 0 = FULL AUTO (Put Block -> Hand -> Break -> Jeda -> Maju), 1 = BREAK ONLY, 2 = PLACE ONLY
     private var farmSubMode = 0
+    // Arah Maju setelah Break: 1 = MAJU KANAN [▶], 2 = MAJU KIRI [◀], 0 = DIAM (OFF)
+    private var stepAfterBreakDir = 1
+
     private var isFarmRunning = false
     private var isMoveRunning = false
     private var isSpamRunning = false
@@ -80,7 +88,7 @@ class MacroService : AccessibilityService() {
     private val selectedTiles = mutableSetOf<Int>()
     private val gridCells = mutableListOf<TextView>()
 
-    // Antrean Langkah Berurutan (Agar Place & Punch tidak bertabrakan)
+    // Antrean Langkah Berurutan
     private data class MacroStep(
         val x: Float,
         val y: Float,
@@ -97,13 +105,20 @@ class MacroService : AccessibilityService() {
     private var blockSlotY = 0f
     private var handSlotX = 0f
     private var handSlotY = 0f
+    private var leftBtnX = 0f
+    private var leftBtnY = 0f
+    private var rightBtnX = 0f
+    private var rightBtnY = 0f
     private var tileSizePx = 110
 
     // Parameter Timing
-    private var punchHitsPerBlock = 4     // Berapa kali pukul per blok setelah ditaruh
-    private var punchHoldMs = 150L        // Durasi tahan setiap pukulan
-    private var actionDelayMs = 130L      // Jeda antar place / antar pukulan
-    private var slotSwitchDelayMs = 200L  // Jeda setelah ganti slot Block <-> Hand
+    private var punchHitsPerBlock = 4      // Jumlah pukulan per blok
+    private var punchHoldMs = 150L         // Durasi tahan setiap pukulan
+    private var actionDelayMs = 130L       // Jeda antar place / antar pukulan
+    private var slotSwitchDelayMs = 200L   // Jeda ganti slot Block <-> Hand
+    private var pauseAfterBreakMs = 250L   // Jeda setelah break sebelum mulai maju
+    private var stepForwardHoldMs = 220L   // Durasi tahan tombol maju (jarak langkah)
+    private var pauseAfterMoveMs = 150L    // Jeda setelah maju sebelum put block lagi
     private var moveHoldMs = 1000L
     private var spamIntervalSec = 5
     private var randomDelayMs = 30
@@ -131,7 +146,7 @@ class MacroService : AccessibilityService() {
             runCatching { windowManager?.updateViewLayout(iconView, p) }
         }
         menuParams?.let { p ->
-            p.x = p.x.coerceIn(0, (dm.widthPixels - dp(300)).coerceAtLeast(0))
+            p.x = p.x.coerceIn(0, (dm.widthPixels - dp(305)).coerceAtLeast(0))
             p.y = p.y.coerceIn(0, (dm.heightPixels - dp(250)).coerceAtLeast(0))
             runCatching { windowManager?.updateViewLayout(menuView, p) }
         }
@@ -152,6 +167,10 @@ class MacroService : AccessibilityService() {
         blockSlotY = prefs.getFloat("blockSlotY", landH * 0.90f)
         handSlotX = prefs.getFloat("handSlotX", landW * 0.36f)
         handSlotY = prefs.getFloat("handSlotY", landH * 0.90f)
+        leftBtnX = prefs.getFloat("leftBtnX", landW * 0.08f)
+        leftBtnY = prefs.getFloat("leftBtnY", landH * 0.82f)
+        rightBtnX = prefs.getFloat("rightBtnX", landW * 0.21f)
+        rightBtnY = prefs.getFloat("rightBtnY", landH * 0.82f)
         tileSizePx = prefs.getInt("tileSizePx", (landW * 0.055f).toInt().coerceAtLeast(55))
     }
 
@@ -187,8 +206,7 @@ class MacroService : AccessibilityService() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
         selectedTiles.clear()
-        selectedTiles.add(6)
-        selectedTiles.add(8)
+        selectedTiles.add(8) // Default 1 kotak di depan kanan karakter
 
         buildFloatingMenu()
         buildFloatingIcon()
@@ -211,7 +229,6 @@ class MacroService : AccessibilityService() {
         iconParams = createBaseLayoutParams(dp(44), dp(44), dp(14), dp(24))
         makeDraggable(iconView!!, iconParams!!) {
             if (isFarmRunning || isMoveRunning || isSpamRunning) {
-                // 1-Tap Stop saat macro berjalan + buka kembali Mod Menu
                 stopAllAutomation()
                 isMenuOpen = true
                 menuView?.visibility = View.VISIBLE
@@ -298,7 +315,7 @@ class MacroService : AccessibilityService() {
         val scrollContainer = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(195)
+                dp(200)
             ).apply { topMargin = dp(8) }
         }
 
@@ -315,7 +332,7 @@ class MacroService : AccessibilityService() {
         scrollContainer.addView(pages)
         menuView?.addView(scrollContainer)
 
-        menuParams = createBaseLayoutParams(dp(300), WindowManager.LayoutParams.WRAP_CONTENT, dp(64), dp(16))
+        menuParams = createBaseLayoutParams(dp(305), WindowManager.LayoutParams.WRAP_CONTENT, dp(64), dp(14))
         makeDraggable(header, menuParams!!, null)
         windowManager?.addView(menuView, menuParams)
         switchTab(0)
@@ -380,7 +397,7 @@ class MacroService : AccessibilityService() {
                 background = makeBoxBg("#1E151B", "#EF4444", 6, 1)
                 layoutParams = LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
-                    dp(30)
+                    dp(28)
                 ).apply { topMargin = dp(6) }
                 setOnClickListener {
                     selectedTiles.clear()
@@ -390,9 +407,9 @@ class MacroService : AccessibilityService() {
             }
             addView(btnClearGrid)
 
-            // Tombol Pilih Mode Farm
+            // Tombol Pilih Urutan Farm
             btnFarmModeCycle = Button(this@MacroService).apply {
-                text = "MODE: PLACE BLOCK -> GANTI HAND -> PUNCH"
+                text = "URUTAN: PUT BLOCK -> BREAK -> JEDA -> MAJU"
                 textSize = 10f
                 setTypeface(null, Typeface.BOLD)
                 setTextColor(Color.parseColor("#00E5FF"))
@@ -404,14 +421,37 @@ class MacroService : AccessibilityService() {
                 setOnClickListener {
                     farmSubMode = (farmSubMode + 1) % 3
                     text = when (farmSubMode) {
-                        0 -> "MODE: PLACE BLOCK -> GANTI HAND -> PUNCH"
-                        1 -> "MODE: HANYA PUNCH (BREAK ONLY)"
-                        else -> "MODE: HANYA PLACE (TARUH BLOCK ONLY)"
+                        0 -> "URUTAN: PUT BLOCK -> BREAK -> JEDA -> MAJU"
+                        1 -> "URUTAN: HANYA BREAK -> JEDA -> MAJU"
+                        else -> "URUTAN: HANYA PUT BLOCK -> JEDA -> MAJU"
                     }
                     if (isFarmRunning) rebuildFarmQueue()
                 }
             }
             addView(btnFarmModeCycle)
+
+            // Tombol Pilih Arah Maju Setelah Break
+            btnStepDirCycle = Button(this@MacroService).apply {
+                text = "ARAH MAJU SETELAH BREAK: KANAN [▶]"
+                textSize = 10f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.parseColor("#FBBF24"))
+                background = makeBoxBg("#231C11", "#F59E0B", 8, 1)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    dp(34)
+                ).apply { topMargin = dp(6) }
+                setOnClickListener {
+                    stepAfterBreakDir = (stepAfterBreakDir + 1) % 3
+                    text = when (stepAfterBreakDir) {
+                        1 -> "ARAH MAJU SETELAH BREAK: KANAN [▶]"
+                        2 -> "ARAH MAJU SETELAH BREAK: KIRI [◀]"
+                        else -> "ARAH MAJU SETELAH BREAK: DIAM (OFF)"
+                    }
+                    if (isFarmRunning) rebuildFarmQueue()
+                }
+            }
+            addView(btnStepDirCycle)
 
             // Tombol Start / Stop Farm
             btnStartStopFarm = Button(this@MacroService).apply {
@@ -433,6 +473,16 @@ class MacroService : AccessibilityService() {
                 }
             }
             addView(btnStartStopFarm)
+
+            addView(makeSlider("Jeda Setelah Break (Sebelum Maju)", pauseAfterBreakMs.toInt(), 50, 1500, "ms") {
+                pauseAfterBreakMs = it.toLong()
+                if (isFarmRunning) rebuildFarmQueue()
+            })
+
+            addView(makeSlider("Durasi Tekan Maju (Jarak Langkah)", stepForwardHoldMs.toInt(), 50, 1500, "ms") {
+                stepForwardHoldMs = it.toLong()
+                if (isFarmRunning) rebuildFarmQueue()
+            })
 
             addView(makeSlider("Jumlah Pukulan per Blok", punchHitsPerBlock, 1, 12, "x") {
                 punchHitsPerBlock = it
@@ -461,7 +511,7 @@ class MacroService : AccessibilityService() {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
 
-            addView(makeHint("Auto Patroli menyentuh sisi kiri & kanan layar lanskap."))
+            addView(makeHint("Auto Patroli menyentuh posisi tombol jalan Kiri [◀] & Kanan [▶] yang sudah dikalibrasi."))
 
             val row = makeToggleRow("Auto Walk Left / Right", isMoveRunning) { checked ->
                 if (checked) {
@@ -519,10 +569,10 @@ class MacroService : AccessibilityService() {
             orientation = LinearLayout.VERTICAL
             visibility = View.GONE
 
-            addView(makeHint("1. Tekan tombol di bawah.\n2. Geser [⊕] ke badan karakter, [BLK] ke slot block, [HND] ke slot tinju/hand.\n3. Tekan SIMPAN."))
+            addView(makeHint("1. Tekan tombol di bawah.\n2. Geser [⊕] ke karakter, [BLK] ke slot block, [HND] ke slot tinju, serta [◀] & [▶] ke tombol jalan.\n3. Tekan SIMPAN."))
 
             btnCalibrateAll = Button(this@MacroService).apply {
-                text = "ATUR POSISI [⊕ KARAKTER | BLK | HND]"
+                text = "ATUR POSISI [⊕ | BLK | HND | ◀ | ▶]"
                 textSize = 11f
                 setTypeface(null, Typeface.BOLD)
                 setTextColor(Color.parseColor("#0D111A"))
@@ -550,16 +600,16 @@ class MacroService : AccessibilityService() {
         }
     }
 
-    // --- SISTEM KALIBRASI AKURAT BERBASIS getLocationOnScreen() ---
+    // --- SISTEM KALIBRASI 5 TITIK AKURAT BERBASIS getLocationOnScreen() ---
     private fun showCalibrationMarkers() {
         if (isCalibrating) return
         stopAllAutomation()
         isCalibrating = true
 
-        btnCalibrateAll.text = "✔ SIMPAN POSISI KALIBRASI"
+        btnCalibrateAll.text = "✔ SIMPAN SEMUA POSISI KALIBRASI"
         btnCalibrateAll.background = makeBoxBg("#22C55E", "#22C55E", 8, 1)
 
-        val size = dp(42)
+        val size = dp(40)
         val half = size / 2
 
         markerChar = makeMarkerBadge("⊕", "#00E5FF", "#990E7490")
@@ -577,7 +627,17 @@ class MacroService : AccessibilityService() {
         makeDraggable(markerHand!!, markerHandParams!!, null)
         windowManager?.addView(markerHand, markerHandParams)
 
-        Toast.makeText(this, "Geser ⊕, BLK, dan HND ke posisinya lalu tekan SIMPAN!", Toast.LENGTH_LONG).show()
+        markerLeft = makeMarkerBadge("◀", "#A855F7", "#99581C87")
+        markerLeftParams = createBaseLayoutParams(size, size, (leftBtnX - half).toInt(), (leftBtnY - half).toInt())
+        makeDraggable(markerLeft!!, markerLeftParams!!, null)
+        windowManager?.addView(markerLeft, markerLeftParams)
+
+        markerRight = makeMarkerBadge("▶", "#EC4899", "#99831843")
+        markerRightParams = createBaseLayoutParams(size, size, (rightBtnX - half).toInt(), (rightBtnY - half).toInt())
+        makeDraggable(markerRight!!, markerRightParams!!, null)
+        windowManager?.addView(markerRight, markerRightParams)
+
+        Toast.makeText(this, "Geser ⊕, BLK, HND, ◀, dan ▶ ke posisinya lalu tekan SIMPAN!", Toast.LENGTH_LONG).show()
     }
 
     private fun saveAndHideCalibrationMarkers() {
@@ -601,6 +661,18 @@ class MacroService : AccessibilityService() {
             handSlotX = loc[0] + v.width / 2f
             handSlotY = loc[1] + v.height / 2f
         }
+        markerLeft?.let { v ->
+            val loc = IntArray(2)
+            v.getLocationOnScreen(loc)
+            leftBtnX = loc[0] + v.width / 2f
+            leftBtnY = loc[1] + v.height / 2f
+        }
+        markerRight?.let { v ->
+            val loc = IntArray(2)
+            v.getLocationOnScreen(loc)
+            rightBtnX = loc[0] + v.width / 2f
+            rightBtnY = loc[1] + v.height / 2f
+        }
 
         prefs.edit()
             .putFloat("charX", charX)
@@ -609,10 +681,14 @@ class MacroService : AccessibilityService() {
             .putFloat("blockSlotY", blockSlotY)
             .putFloat("handSlotX", handSlotX)
             .putFloat("handSlotY", handSlotY)
+            .putFloat("leftBtnX", leftBtnX)
+            .putFloat("leftBtnY", leftBtnY)
+            .putFloat("rightBtnX", rightBtnX)
+            .putFloat("rightBtnY", rightBtnY)
             .apply()
 
         removeCalibrationMarkers()
-        Toast.makeText(this, "Kalibrasi Karakter, BLK & HND tersimpan!", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Semua posisi kalibrasi berhasil disimpan!", Toast.LENGTH_SHORT).show()
     }
 
     private fun removeCalibrationMarkers() {
@@ -620,12 +696,16 @@ class MacroService : AccessibilityService() {
         runCatching { windowManager?.removeView(markerChar) }
         runCatching { windowManager?.removeView(markerBlock) }
         runCatching { windowManager?.removeView(markerHand) }
+        runCatching { windowManager?.removeView(markerLeft) }
+        runCatching { windowManager?.removeView(markerRight) }
         markerChar = null
         markerBlock = null
         markerHand = null
+        markerLeft = null
+        markerRight = null
 
         if (::btnCalibrateAll.isInitialized) {
-            btnCalibrateAll.text = "ATUR POSISI [⊕ KARAKTER | BLK | HND]"
+            btnCalibrateAll.text = "ATUR POSISI [⊕ | BLK | HND | ◀ | ▶]"
             btnCalibrateAll.background = makeBoxBg("#00E5FF", "#00E5FF", 8, 1)
         }
     }
@@ -645,7 +725,7 @@ class MacroService : AccessibilityService() {
         }
     }
 
-    // --- MESIN EKSEKUSI BERURUTAN (BLOCK -> PLACE -> HAND -> PUNCH) ---
+    // --- MESIN EKSEKUSI: PUT BLOCK -> BREAK -> JEDA -> MAJU ---
     private fun startFarmAutomation() {
         if (selectedTiles.isEmpty()) {
             Toast.makeText(this, "Pilih minimal 1 kotak blok di grid!", Toast.LENGTH_SHORT).show()
@@ -654,7 +734,6 @@ class MacroService : AccessibilityService() {
         if (isCalibrating) saveAndHideCalibrationMarkers()
         stopAllAutomation()
 
-        // Otomatis sembunyikan menu agar tidak tersentuh oleh auto-clicker
         isMenuOpen = false
         menuView?.visibility = View.GONE
 
@@ -678,7 +757,7 @@ class MacroService : AccessibilityService() {
                 // 1. Pilih Slot Block di Hotbar
                 stepQueue.add(MacroStep(blockSlotX, blockSlotY, 55L, slotSwitchDelayMs))
 
-                // 2. Taruh (Place) Block di semua kotak grid yang dipilih
+                // 2. Taruh (Put) Block di semua kotak grid yang dipilih
                 for (tileIdx in tiles) {
                     val (tx, ty) = getTileScreenCoord(tileIdx)
                     stepQueue.add(MacroStep(tx, ty, 55L, actionDelayMs))
@@ -687,27 +766,68 @@ class MacroService : AccessibilityService() {
                 // 3. Ganti ke Slot Hand / Fist di Hotbar
                 stepQueue.add(MacroStep(handSlotX, handSlotY, 55L, slotSwitchDelayMs))
 
-                // 4. Pukul (Punch) semua kotak grid yang dipilih sebanyak punchHitsPerBlock
+                // 4. Break (Punch) semua kotak grid sebanyak punchHitsPerBlock
                 for (hit in 0 until punchHitsPerBlock) {
-                    for (tileIdx in tiles) {
-                        val (tx, ty) = getTileScreenCoord(tileIdx)
-                        stepQueue.add(MacroStep(tx, ty, punchHoldMs, actionDelayMs))
+                    for (tIdx in tiles.indices) {
+                        val (tx, ty) = getTileScreenCoord(tiles[tIdx])
+                        val isLastPunch = (hit == punchHitsPerBlock - 1) && (tIdx == tiles.size - 1)
+                        // Jika ini pukulan terakhir dan mode Maju aktif, beri jeda pauseAfterBreakMs
+                        val delayAfter = if (isLastPunch && stepAfterBreakDir != 0) {
+                            pauseAfterBreakMs
+                        } else {
+                            actionDelayMs
+                        }
+                        stepQueue.add(MacroStep(tx, ty, punchHoldMs, delayAfter))
                     }
                 }
+
+                // 5. Setelah jeda break selesai, tekan tombol Maju (Kanan atau Kiri)
+                appendStepForwardCommand()
             }
 
             1 -> {
-                for (tileIdx in tiles) {
-                    val (tx, ty) = getTileScreenCoord(tileIdx)
-                    stepQueue.add(MacroStep(tx, ty, punchHoldMs, actionDelayMs))
+                // Mode Hanya Break -> Jeda -> Maju
+                for (hit in 0 until punchHitsPerBlock) {
+                    for (tIdx in tiles.indices) {
+                        val (tx, ty) = getTileScreenCoord(tiles[tIdx])
+                        val isLastPunch = (hit == punchHitsPerBlock - 1) && (tIdx == tiles.size - 1)
+                        val delayAfter = if (isLastPunch && stepAfterBreakDir != 0) {
+                            pauseAfterBreakMs
+                        } else {
+                            actionDelayMs
+                        }
+                        stepQueue.add(MacroStep(tx, ty, punchHoldMs, delayAfter))
+                    }
                 }
+                appendStepForwardCommand()
             }
 
             2 -> {
-                for (tileIdx in tiles) {
-                    val (tx, ty) = getTileScreenCoord(tileIdx)
-                    stepQueue.add(MacroStep(tx, ty, 55L, actionDelayMs))
+                // Mode Hanya Put Block -> Jeda -> Maju
+                for (tIdx in tiles.indices) {
+                    val (tx, ty) = getTileScreenCoord(tiles[tIdx])
+                    val isLastPlace = (tIdx == tiles.size - 1)
+                    val delayAfter = if (isLastPlace && stepAfterBreakDir != 0) {
+                        pauseAfterBreakMs
+                    } else {
+                        actionDelayMs
+                    }
+                    stepQueue.add(MacroStep(tx, ty, 55L, delayAfter))
                 }
+                appendStepForwardCommand()
+            }
+        }
+    }
+
+    private fun appendStepForwardCommand() {
+        when (stepAfterBreakDir) {
+            1 -> {
+                // Maju ke Kanan [▶]
+                stepQueue.add(MacroStep(rightBtnX, rightBtnY, stepForwardHoldMs, pauseAfterMoveMs))
+            }
+            2 -> {
+                // Maju ke Kiri [◀]
+                stepQueue.add(MacroStep(leftBtnX, leftBtnY, stepForwardHoldMs, pauseAfterMoveMs))
             }
         }
     }
@@ -737,11 +857,10 @@ class MacroService : AccessibilityService() {
 
     private fun runMoveLoop() {
         if (!isMoveRunning) return
-        val dm = resources.displayMetrics
         val jitter = if (randomDelayMs > 0) Random.nextLong(0, randomDelayMs.toLong() + 1) else 0L
 
-        val tapX = if (moveDirectionRight) dm.widthPixels * 0.22f else dm.widthPixels * 0.08f
-        val tapY = dm.heightPixels * 0.84f
+        val tapX = if (moveDirectionRight) rightBtnX else leftBtnX
+        val tapY = if (moveDirectionRight) rightBtnY else leftBtnY
         moveDirectionRight = !moveDirectionRight
 
         dispatchTapOrHold(tapX, tapY, moveHoldMs) {
